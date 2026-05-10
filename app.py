@@ -10,7 +10,10 @@ from telethon.tl.functions.channels import GetFullChannelRequest
 
 app = Flask(__name__)
 
-# ================= CONFIG =================
+# ======================================================
+# CONFIG
+# ======================================================
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
@@ -18,17 +21,37 @@ SESSION = os.getenv("SESSION")
 
 BASE_URL = "https://t.me/"
 
-# ================= TELETHON =================
-loop = asyncio.get_event_loop()
-client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
+# ======================================================
+# EVENT LOOP FIX (RAILWAY + GUNICORN FIXED)
+# ======================================================
 
-async def init():
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+client = TelegramClient(
+    StringSession(SESSION),
+    API_ID,
+    API_HASH,
+    loop=loop
+)
+
+# ======================================================
+# TELETHON START
+# ======================================================
+
+async def init_client():
     await client.start(bot_token=BOT_TOKEN)
-    print("✅ Premium Bot Started Successfully")
+    print("✅ Premium Telegram Client Started")
 
-loop.run_until_complete(init())
+try:
+    loop.run_until_complete(init_client())
+except Exception as e:
+    print(f"❌ TELETHON START ERROR: {e}")
 
-# ================= HELPER FUNCTIONS =================
+# ======================================================
+# HELPER FUNCTIONS
+# ======================================================
+
 def clean_html(text):
     return re.sub("<.*?>", "", text).strip() if text else "N/A"
 
@@ -39,13 +62,24 @@ def safe_get(obj, attr, default="N/A"):
     except:
         return default
 
-# ================= MAIN ROUTE =================
-@app.route("/")
-def user_data():
+# ======================================================
+# HEALTH CHECK ROUTE
+# ======================================================
 
-    # দুইভাবেই ইনপুট নেওয়া যাবে
-    # /?user=@username
-    # /?chat_id=123456789
+@app.route("/health")
+def health():
+    return jsonify({
+        "success": True,
+        "status": "running",
+        "service": "Premium Telegram Info API"
+    })
+
+# ======================================================
+# MAIN ROUTE
+# ======================================================
+
+@app.route("/")
+def telegram_info():
 
     username = request.args.get("user")
     chat_id = request.args.get("chat_id")
@@ -55,14 +89,17 @@ def user_data():
             "success": False,
             "error": "Please provide username or chat_id",
             "example_1": "/?user=@username",
-            "example_2": "/?chat_id=123456789"
+            "example_2": "/?chat_id=777000"
         }), 400
 
     try:
 
-        async def fetch_telegram_info():
+        async def fetch_data():
 
-            # ================= ENTITY LOAD =================
+            # ======================================================
+            # ENTITY LOAD
+            # ======================================================
+
             if username:
 
                 if not username.startswith("@"):
@@ -71,24 +108,28 @@ def user_data():
                     username_fixed = username
 
                 entity = await client.get_entity(username_fixed)
-                target_value = username_fixed
+                target = username_fixed
 
             else:
+
                 entity = await client.get_entity(int(chat_id))
-                target_value = chat_id
+                target = chat_id
 
             entity_id = entity.id
 
             data = {
                 "success": True,
                 "credit": "@sakib01994",
-                "target": target_value,
+                "target": target,
                 "id": entity_id,
                 "access_hash": safe_get(entity, "access_hash"),
                 "type": "Unknown"
             }
 
-            # ================= USER INFO =================
+            # ======================================================
+            # USER INFO
+            # ======================================================
+
             if isinstance(entity, types.User):
 
                 data["type"] = "User"
@@ -98,16 +139,22 @@ def user_data():
                 status = "Unknown"
 
                 try:
+
                     if isinstance(entity.status, types.UserStatusOnline):
                         status = "Online"
+
                     elif isinstance(entity.status, types.UserStatusOffline):
                         status = "Offline"
+
                     elif isinstance(entity.status, types.UserStatusRecently):
                         status = "Recently Active"
+
                     elif isinstance(entity.status, types.UserStatusLastWeek):
                         status = "Last Week"
+
                     elif isinstance(entity.status, types.UserStatusLastMonth):
                         status = "Last Month"
+
                 except:
                     pass
 
@@ -137,17 +184,13 @@ def user_data():
                     "is_restricted": safe_get(entity, "restricted", False),
                     "premium_user": safe_get(entity, "premium", False),
 
-                    "dc_id": safe_get(
-                        entity.photo,
-                        "dc_id"
-                    ) if safe_get(entity, "photo", None) else "N/A",
+                    "dc_id": (
+                        safe_get(entity.photo, "dc_id")
+                        if safe_get(entity, "photo", None)
+                        else "N/A"
+                    ),
 
                     "has_profile_photo": bool(entity.photo),
-
-                    "can_pin_message": safe_get(
-                        full.full_user,
-                        "pinned_msg_id"
-                    ),
 
                     "blocked": safe_get(
                         full.full_user,
@@ -180,7 +223,10 @@ def user_data():
                     )
                 })
 
-            # ================= GROUP / CHANNEL INFO =================
+            # ======================================================
+            # GROUP / CHANNEL INFO
+            # ======================================================
+
             elif isinstance(entity, (types.Chat, types.Channel)):
 
                 data["type"] = (
@@ -262,18 +308,6 @@ def user_data():
                         False
                     ),
 
-                    "can_set_username": safe_get(
-                        full.full_chat,
-                        "can_set_username",
-                        False
-                    ),
-
-                    "has_scheduled": safe_get(
-                        full.full_chat,
-                        "has_scheduled",
-                        False
-                    ),
-
                     "has_hidden_members": safe_get(
                         full.full_chat,
                         "has_hidden_members",
@@ -292,27 +326,35 @@ def user_data():
                         False
                     ),
 
-                    "dc_id": safe_get(
-                        entity.photo,
-                        "dc_id"
-                    ) if safe_get(entity, "photo", None) else "N/A",
+                    "dc_id": (
+                        safe_get(entity.photo, "dc_id")
+                        if safe_get(entity, "photo", None)
+                        else "N/A"
+                    ),
 
                     "has_profile_photo": bool(entity.photo)
                 })
 
-            # ================= PROFILE PHOTO =================
+            # ======================================================
+            # PROFILE PHOTO CHECK
+            # ======================================================
+
             try:
+
                 photo = await client.download_profile_photo(
                     entity,
                     file=bytes
                 )
 
-                data["profile_photo_found"] = True if photo else False
+                data["profile_photo_found"] = bool(photo)
 
             except:
                 data["profile_photo_found"] = False
 
-            # ================= PUBLIC SCRAPING =================
+            # ======================================================
+            # PUBLIC TELEGRAM SCRAPE
+            # ======================================================
+
             try:
 
                 public_username = safe_get(entity, "username")
@@ -326,7 +368,7 @@ def user_data():
                         headers={
                             "User-Agent": "Mozilla/5.0"
                         },
-                        timeout=5
+                        timeout=10
                     )
 
                     if web_res.status_code == 200:
@@ -363,10 +405,9 @@ def user_data():
 
             return data
 
-        # ================= FINAL RESULT =================
-        final_result = loop.run_until_complete(fetch_telegram_info())
+        result = loop.run_until_complete(fetch_data())
 
-        return jsonify(final_result)
+        return jsonify(result)
 
     except Exception as e:
 
@@ -375,10 +416,13 @@ def user_data():
             "error": str(e)
         }), 500
 
-# ================= RUN =================
+# ======================================================
+# RUN SERVER
+# ======================================================
+
 if __name__ == "__main__":
 
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.environ.get("PORT", 8080))
 
     app.run(
         host="0.0.0.0",
