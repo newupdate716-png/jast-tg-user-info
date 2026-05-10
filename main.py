@@ -1,18 +1,30 @@
 import os
+import re
 import asyncio
 import requests
-import re
+
 from flask import Flask, jsonify, request
+
 from telethon import TelegramClient, types
 from telethon.sessions import StringSession
+
+from telethon.errors import (
+    UsernameInvalidError,
+    UsernameNotOccupiedError
+)
+
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.functions.channels import GetFullChannelRequest
 
+# =========================================================
+# FLASK APP
+# =========================================================
+
 app = Flask(__name__)
 
-# ======================================================
+# =========================================================
 # CONFIG
-# ======================================================
+# =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_ID = int(os.getenv("API_ID"))
@@ -21,9 +33,9 @@ SESSION = os.getenv("SESSION")
 
 BASE_URL = "https://t.me/"
 
-# ======================================================
-# EVENT LOOP FIX (RAILWAY + GUNICORN FIXED)
-# ======================================================
+# =========================================================
+# EVENT LOOP FIX
+# =========================================================
 
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
@@ -35,25 +47,22 @@ client = TelegramClient(
     loop=loop
 )
 
-# ======================================================
-# TELETHON START
-# ======================================================
+# =========================================================
+# START CLIENT
+# =========================================================
 
-async def init_client():
+async def start_client():
     await client.start(bot_token=BOT_TOKEN)
-    print("✅ Premium Telegram Client Started")
+    print("✅ Premium Telegram API Started")
 
 try:
-    loop.run_until_complete(init_client())
+    loop.run_until_complete(start_client())
 except Exception as e:
-    print(f"❌ TELETHON START ERROR: {e}")
+    print(f"❌ START ERROR: {e}")
 
-# ======================================================
-# HELPER FUNCTIONS
-# ======================================================
-
-def clean_html(text):
-    return re.sub("<.*?>", "", text).strip() if text else "N/A"
+# =========================================================
+# HELPERS
+# =========================================================
 
 def safe_get(obj, attr, default="N/A"):
     try:
@@ -62,21 +71,104 @@ def safe_get(obj, attr, default="N/A"):
     except:
         return default
 
-# ======================================================
-# HEALTH CHECK ROUTE
-# ======================================================
+def clean_html(text):
+    return re.sub("<.*?>", "", text).strip() if text else "N/A"
+
+# =========================================================
+# PREMIUM ENTITY RESOLVER
+# =========================================================
+
+async def resolve_entity(user=None, chat_id=None):
+
+    # =========================================
+    # USERNAME SYSTEM
+    # =========================================
+
+    if user:
+
+        if not user.startswith("@"):
+            user = "@" + user
+
+        try:
+            return await client.get_entity(user)
+
+        except UsernameInvalidError:
+            raise Exception("Invalid username")
+
+        except UsernameNotOccupiedError:
+            raise Exception("Username not found")
+
+    # =========================================
+    # CHAT ID SYSTEM
+    # =========================================
+
+    if chat_id:
+
+        try:
+            chat_id = int(chat_id)
+
+        except:
+            raise Exception("Invalid chat_id")
+
+        # =====================================
+        # TRY INPUT ENTITY
+        # =====================================
+
+        try:
+            return await client.get_input_entity(chat_id)
+
+        except:
+            pass
+
+        # =====================================
+        # TRY DIRECT ENTITY
+        # =====================================
+
+        try:
+            return await client.get_entity(chat_id)
+
+        except:
+            pass
+
+        # =====================================
+        # SEARCH DIALOGS
+        # =====================================
+
+        try:
+
+            async for dialog in client.iter_dialogs():
+
+                entity = dialog.entity
+
+                if getattr(entity, "id", None) == abs(chat_id):
+                    return entity
+
+        except:
+            pass
+
+        raise Exception(
+            "Entity not found in session. "
+            "User/Group/Channel must exist in account dialogs."
+        )
+
+    raise Exception("No username or chat_id provided")
+
+# =========================================================
+# HEALTH CHECK
+# =========================================================
 
 @app.route("/health")
 def health():
+
     return jsonify({
         "success": True,
-        "status": "running",
-        "service": "Premium Telegram Info API"
+        "service": "Premium Telegram Info API",
+        "status": "running"
     })
 
-# ======================================================
-# MAIN ROUTE
-# ======================================================
+# =========================================================
+# MAIN API
+# =========================================================
 
 @app.route("/")
 def telegram_info():
@@ -85,74 +177,85 @@ def telegram_info():
     chat_id = request.args.get("chat_id")
 
     if not username and not chat_id:
+
         return jsonify({
             "success": False,
-            "error": "Please provide username or chat_id",
-            "example_1": "/?user=@username",
+            "error": "Provide user or chat_id",
+            "example_1": "/?user=durov",
             "example_2": "/?chat_id=777000"
         }), 400
 
     try:
 
-        async def fetch_data():
+        async def fetch():
 
-            # ======================================================
-            # ENTITY LOAD
-            # ======================================================
+            entity = await resolve_entity(
+                user=username,
+                chat_id=chat_id
+            )
 
-            if username:
+            # =====================================
+            # FIX INPUT ENTITY ISSUE
+            # =====================================
 
-                if not username.startswith("@"):
-                    username_fixed = "@" + username
-                else:
-                    username_fixed = username
-
-                entity = await client.get_entity(username_fixed)
-                target = username_fixed
-
-            else:
-
-                entity = await client.get_entity(int(chat_id))
-                target = chat_id
-
-            entity_id = entity.id
+            if not isinstance(
+                entity,
+                (types.User, types.Chat, types.Channel)
+            ):
+                entity = await client.get_entity(entity)
 
             data = {
                 "success": True,
                 "credit": "@sakib01994",
-                "target": target,
-                "id": entity_id,
+                "id": safe_get(entity, "id"),
                 "access_hash": safe_get(entity, "access_hash"),
                 "type": "Unknown"
             }
 
-            # ======================================================
+            # =====================================
             # USER INFO
-            # ======================================================
+            # =====================================
 
             if isinstance(entity, types.User):
 
                 data["type"] = "User"
 
-                full = await client(GetFullUserRequest(entity))
+                full = await client(
+                    GetFullUserRequest(entity)
+                )
 
                 status = "Unknown"
 
                 try:
 
-                    if isinstance(entity.status, types.UserStatusOnline):
+                    if isinstance(
+                        entity.status,
+                        types.UserStatusOnline
+                    ):
                         status = "Online"
 
-                    elif isinstance(entity.status, types.UserStatusOffline):
+                    elif isinstance(
+                        entity.status,
+                        types.UserStatusOffline
+                    ):
                         status = "Offline"
 
-                    elif isinstance(entity.status, types.UserStatusRecently):
+                    elif isinstance(
+                        entity.status,
+                        types.UserStatusRecently
+                    ):
                         status = "Recently Active"
 
-                    elif isinstance(entity.status, types.UserStatusLastWeek):
+                    elif isinstance(
+                        entity.status,
+                        types.UserStatusLastWeek
+                    ):
                         status = "Last Week"
 
-                    elif isinstance(entity.status, types.UserStatusLastMonth):
+                    elif isinstance(
+                        entity.status,
+                        types.UserStatusLastMonth
+                    ):
                         status = "Last Month"
 
                 except:
@@ -160,184 +263,162 @@ def telegram_info():
 
                 data.update({
 
-                    "first_name": safe_get(entity, "first_name"),
-                    "last_name": safe_get(entity, "last_name"),
-                    "username": safe_get(entity, "username"),
-                    "phone": safe_get(entity, "phone", "Private"),
-                    "bio": safe_get(full.full_user, "about"),
+                    "first_name":
+                        safe_get(entity, "first_name"),
 
-                    "common_chats": safe_get(
-                        full.full_user,
-                        "common_chats_count",
-                        0
-                    ),
+                    "last_name":
+                        safe_get(entity, "last_name"),
 
-                    "language_code": safe_get(entity, "lang_code"),
+                    "username":
+                        safe_get(entity, "username"),
 
-                    "status": status,
+                    "phone":
+                        safe_get(entity, "phone", "Private"),
 
-                    "is_bot": safe_get(entity, "bot", False),
-                    "is_verified": safe_get(entity, "verified", False),
-                    "is_scam": safe_get(entity, "scam", False),
-                    "is_fake": safe_get(entity, "fake", False),
-                    "is_support": safe_get(entity, "support", False),
-                    "is_restricted": safe_get(entity, "restricted", False),
-                    "premium_user": safe_get(entity, "premium", False),
+                    "bio":
+                        safe_get(full.full_user, "about"),
 
-                    "dc_id": (
-                        safe_get(entity.photo, "dc_id")
-                        if safe_get(entity, "photo", None)
-                        else "N/A"
-                    ),
+                    "common_chats":
+                        safe_get(
+                            full.full_user,
+                            "common_chats_count",
+                            0
+                        ),
 
-                    "has_profile_photo": bool(entity.photo),
+                    "language_code":
+                        safe_get(entity, "lang_code"),
 
-                    "blocked": safe_get(
-                        full.full_user,
-                        "blocked",
-                        False
-                    ),
+                    "status":
+                        status,
 
-                    "contact": safe_get(
-                        full.full_user,
-                        "contact",
-                        False
-                    ),
+                    "premium":
+                        safe_get(entity, "premium", False),
 
-                    "mutual_contact": safe_get(
-                        full.full_user,
-                        "mutual_contact",
-                        False
-                    ),
+                    "verified":
+                        safe_get(entity, "verified", False),
 
-                    "stories_hidden": safe_get(
-                        full.full_user,
-                        "stories_hidden",
-                        False
-                    ),
+                    "scam":
+                        safe_get(entity, "scam", False),
 
-                    "stories_unavailable": safe_get(
-                        full.full_user,
-                        "stories_unavailable",
-                        False
-                    )
+                    "fake":
+                        safe_get(entity, "fake", False),
+
+                    "bot":
+                        safe_get(entity, "bot", False),
+
+                    "restricted":
+                        safe_get(entity, "restricted", False),
+
+                    "dc_id":
+                        (
+                            safe_get(entity.photo, "dc_id")
+                            if entity.photo else "N/A"
+                        ),
+
+                    "has_photo":
+                        bool(entity.photo)
                 })
 
-            # ======================================================
+            # =====================================
             # GROUP / CHANNEL INFO
-            # ======================================================
+            # =====================================
 
-            elif isinstance(entity, (types.Chat, types.Channel)):
+            elif isinstance(
+                entity,
+                (types.Chat, types.Channel)
+            ):
+
+                full = await client(
+                    GetFullChannelRequest(entity)
+                )
+
+                is_channel = (
+                    isinstance(entity, types.Channel)
+                    and not entity.megagroup
+                )
 
                 data["type"] = (
                     "Channel"
-                    if isinstance(entity, types.Channel)
-                    and not entity.megagroup
+                    if is_channel
                     else "Group"
                 )
 
-                full = await client(GetFullChannelRequest(entity))
-
                 data.update({
 
-                    "title": safe_get(entity, "title"),
+                    "title":
+                        safe_get(entity, "title"),
 
-                    "username": safe_get(entity, "username"),
+                    "username":
+                        safe_get(entity, "username"),
 
-                    "participants_count": safe_get(
-                        full.full_chat,
-                        "participants_count",
-                        0
-                    ),
+                    "description":
+                        safe_get(full.full_chat, "about"),
 
-                    "description": safe_get(
-                        full.full_chat,
-                        "about"
-                    ),
+                    "participants":
+                        safe_get(
+                            full.full_chat,
+                            "participants_count",
+                            0
+                        ),
 
-                    "is_verified": safe_get(entity, "verified", False),
+                    "verified":
+                        safe_get(entity, "verified", False),
 
-                    "is_scam": safe_get(entity, "scam", False),
+                    "megagroup":
+                        safe_get(entity, "megagroup", False),
 
-                    "is_fake": safe_get(entity, "fake", False),
+                    "gigagroup":
+                        safe_get(entity, "gigagroup", False),
 
-                    "is_restricted": safe_get(
-                        entity,
-                        "restricted",
-                        False
-                    ),
+                    "broadcast":
+                        safe_get(entity, "broadcast", False),
 
-                    "is_megagroup": safe_get(
-                        entity,
-                        "megagroup",
-                        False
-                    ),
+                    "creator":
+                        safe_get(entity, "creator", False),
 
-                    "gigagroup": safe_get(
-                        entity,
-                        "gigagroup",
-                        False
-                    ),
+                    "restricted":
+                        safe_get(entity, "restricted", False),
 
-                    "broadcast": safe_get(
-                        entity,
-                        "broadcast",
-                        False
-                    ),
+                    "linked_chat_id":
+                        safe_get(
+                            full.full_chat,
+                            "linked_chat_id"
+                        ),
 
-                    "creator": safe_get(
-                        entity,
-                        "creator",
-                        False
-                    ),
+                    "slowmode":
+                        safe_get(
+                            full.full_chat,
+                            "slowmode_enabled",
+                            False
+                        ),
 
-                    "linked_chat_id": safe_get(
-                        full.full_chat,
-                        "linked_chat_id"
-                    ),
+                    "protected_content":
+                        safe_get(
+                            full.full_chat,
+                            "has_protected_content",
+                            False
+                        ),
 
-                    "slowmode_enabled": safe_get(
-                        full.full_chat,
-                        "slowmode_enabled",
-                        False
-                    ),
+                    "hidden_members":
+                        safe_get(
+                            full.full_chat,
+                            "has_hidden_members",
+                            False
+                        ),
 
-                    "can_view_participants": safe_get(
-                        full.full_chat,
-                        "can_view_participants",
-                        False
-                    ),
+                    "dc_id":
+                        (
+                            safe_get(entity.photo, "dc_id")
+                            if entity.photo else "N/A"
+                        ),
 
-                    "has_hidden_members": safe_get(
-                        full.full_chat,
-                        "has_hidden_members",
-                        False
-                    ),
-
-                    "has_private_forwards": safe_get(
-                        full.full_chat,
-                        "has_private_forwards",
-                        False
-                    ),
-
-                    "has_protected_content": safe_get(
-                        full.full_chat,
-                        "has_protected_content",
-                        False
-                    ),
-
-                    "dc_id": (
-                        safe_get(entity.photo, "dc_id")
-                        if safe_get(entity, "photo", None)
-                        else "N/A"
-                    ),
-
-                    "has_profile_photo": bool(entity.photo)
+                    "has_photo":
+                        bool(entity.photo)
                 })
 
-            # ======================================================
+            # =====================================
             # PROFILE PHOTO CHECK
-            # ======================================================
+            # =====================================
 
             try:
 
@@ -351,61 +432,70 @@ def telegram_info():
             except:
                 data["profile_photo_found"] = False
 
-            # ======================================================
-            # PUBLIC TELEGRAM SCRAPE
-            # ======================================================
+            # =====================================
+            # PUBLIC SCRAPE
+            # =====================================
 
             try:
 
-                public_username = safe_get(entity, "username")
+                public_username = safe_get(
+                    entity,
+                    "username"
+                )
 
                 if public_username != "N/A":
 
                     tg_url = BASE_URL + public_username
 
-                    web_res = requests.get(
+                    r = requests.get(
                         tg_url,
                         headers={
-                            "User-Agent": "Mozilla/5.0"
+                            "User-Agent":
+                            "Mozilla/5.0"
                         },
                         timeout=10
                     )
 
-                    if web_res.status_code == 200:
+                    if r.status_code == 200:
 
-                        html = web_res.text
+                        html = r.text
 
                         web_photo = re.search(
                             r'photo_image.*?src="([^"]+)"',
                             html
                         )
 
-                        web_members = re.search(
+                        web_extra = re.search(
                             r'tgme_page_extra">(.*?)</div>',
                             html
                         )
 
                         data["public_view"] = {
 
-                            "telegram_link": tg_url,
+                            "telegram_link":
+                                tg_url,
 
-                            "web_image": (
-                                web_photo.group(1)
-                                if web_photo else None
-                            ),
+                            "web_photo":
+                                (
+                                    web_photo.group(1)
+                                    if web_photo else None
+                                ),
 
-                            "status_bar": (
-                                clean_html(web_members.group(1))
-                                if web_members else "N/A"
-                            )
+                            "extra":
+                                (
+                                    clean_html(
+                                        web_extra.group(1)
+                                    )
+                                    if web_extra else "N/A"
+                                )
                         }
 
             except:
-                data["public_view"] = "Public scrape failed"
+                data["public_view"] = "Failed"
 
             return data
 
-        result = loop.run_until_complete(fetch_data())
+        result = loop.run_until_complete(fetch())
 
         return jsonify(result)
 
@@ -416,16 +506,18 @@ def telegram_info():
             "error": str(e)
         }), 500
 
-# ======================================================
+# =========================================================
 # RUN SERVER
-# ======================================================
+# =========================================================
 
 if __name__ == "__main__":
 
-    port = int(os.environ.get("PORT", 8080))
+    PORT = int(
+        os.environ.get("PORT", 8080)
+    )
 
     app.run(
         host="0.0.0.0",
-        port=port,
+        port=PORT,
         debug=False
     )
